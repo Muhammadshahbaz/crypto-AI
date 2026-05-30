@@ -1,0 +1,9 @@
+services:
+  apex:
+    build: .
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./apex.db:/app/apex.db
+    restart: unless-stopped
