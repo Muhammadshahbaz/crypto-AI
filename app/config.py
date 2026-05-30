@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     dry_run: bool = True
 
     exchange: str = "bitget"
+    trading_mode: str = "paper"  # paper, demo/testnet, live
 
     binance_testnet: bool = True
     binance_api_key: str = ""

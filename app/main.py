@@ -1,3 +1,8 @@
+from app.paper.engine import open_paper_trade
+from app.exchanges.factory import get_exchange_client
+from app.admin.service import load_admin_settings, save_admin_settings
+from fastapi import Body
+from typing import Any
 from fastapi import FastAPI
 from sqlalchemy import select
 from app.config import settings
@@ -87,3 +92,73 @@ async def trades(limit: int = 50):
             'strategy': r.strategy, 'entry': r.entry, 'stop_loss': r.stop_loss,
             'tp1': r.tp1, 'risk_usd': r.risk_usd, 'status': r.status
         } for r in rows]
+
+
+@app.get('/api/admin/settings')
+async def admin_get_settings():
+    return await load_admin_settings()
+
+@app.post('/api/admin/settings')
+async def admin_save_settings(payload: dict[str, Any] = Body(...)):
+    return await save_admin_settings(payload)
+
+@app.get('/api/exchange/account')
+async def exchange_account():
+    client = get_exchange_client()
+    try:
+        balance = await client.fetch_balance()
+        return {
+            'ok': True,
+            'exchange': client.name,
+            'balance': balance,
+            'note': 'In paper mode this may return virtual balance. In demo/live mode restart Docker after saving API keys.'
+        }
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)}
+    finally:
+        await client.close()
+
+@app.post('/api/paper/test-trade')
+async def paper_test_trade(pair: str = 'BTC/USDT', direction: str = 'LONG'):
+    client = get_exchange_client()
+    try:
+        raw = await client.fetch_ohlcv(pair, '1m', 2)
+        entry = float(raw[-1][4])
+    finally:
+        await client.close()
+
+    direction = direction.upper()
+    if direction not in {'LONG', 'SHORT'}:
+        direction = 'LONG'
+
+    if direction == 'LONG':
+        stop_loss = entry * 0.995
+        tp1 = entry * 1.005
+        tp2 = entry * 1.010
+        tp3 = entry * 1.020
+    else:
+        stop_loss = entry * 1.005
+        tp1 = entry * 0.995
+        tp2 = entry * 0.990
+        tp3 = entry * 0.980
+
+    signal = {
+        'exchange': settings.exchange,
+        'pair': pair,
+        'direction': direction,
+        'strategy': 'manual_test',
+        'regime': 'TEST',
+        'entry': entry,
+        'stop_loss': stop_loss,
+        'tp1': tp1,
+        'tp2': tp2,
+        'tp3': tp3,
+        'confidence': 1.0,
+        'reasons': ['Manual admin test trade']
+    }
+    consensus = {'direction': direction, 'consensus_score': 1.0}
+    amount = 10 / entry
+    trade = await open_paper_trade(signal, consensus, amount, 5.0)
+    if trade is None:
+        return {'ok': False, 'message': 'An open paper trade for this pair already exists.'}
+    return {'ok': True, 'trade_id': trade.id, 'pair': pair, 'direction': direction, 'entry': entry}

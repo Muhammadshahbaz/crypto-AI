@@ -1,119 +1,185 @@
-from sqlalchemy import select
-from app.database.session import AsyncSessionLocal
-from app.database.models import AdminSetting, ExchangeCredential
-from app.admin.security import encrypt_secret, mask_secret
+from __future__ import annotations
 
-async def get_setting(key: str, default: str = "") -> str:
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import select
+
+from app.database.session import AsyncSessionLocal
+from app.database.models import BotState
+from app.config import settings
+
+
+SAFE_ENV_KEYS = {
+    "APP_NAME",
+    "EXCHANGE",
+    "TRADING_MODE",
+    "DRY_RUN",
+    "BINANCE_TESTNET",
+    "BINANCE_API_KEY",
+    "BINANCE_API_SECRET",
+    "BINANCE_MARKET_TYPE",
+    "BITGET_API_KEY",
+    "BITGET_API_SECRET",
+    "BITGET_API_PASSWORD",
+    "BITGET_MARKET_TYPE",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "AI_OPENAI_ENABLED",
+    "AI_CLAUDE_ENABLED",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "MAX_RISK_PER_TRADE",
+    "MAX_DAILY_LOSS",
+    "MAX_WEEKLY_LOSS",
+    "DEFAULT_LEVERAGE",
+    "MAX_LEVERAGE",
+    "CONSENSUS_THRESHOLD",
+    "MIN_CONFIDENCE_SCORE",
+    "SIGNAL_CONFLUENCE_REQUIRED",
+    "PREFERRED_PAIRS",
+}
+
+
+def mask_secret(value: str | None) -> str:
+    if not value:
+        return ""
+    value = str(value)
+    if len(value) <= 8:
+        return "****"
+    return value[:4] + "..." + value[-4:]
+
+
+def mode_flags(trading_mode: str) -> dict[str, Any]:
+    mode = (trading_mode or "paper").lower().strip()
+    return {
+        "trading_mode": mode,
+        "is_paper": mode == "paper",
+        "is_exchange_demo": mode in {"demo", "testnet"},
+        "is_live": mode == "live",
+        "live_warning": mode == "live",
+    }
+
+
+def normalize_payload(payload: dict[str, Any]) -> dict[str, str]:
+    clean: dict[str, str] = {}
+    for key, value in payload.items():
+        key = str(key).upper().strip()
+        if key not in SAFE_ENV_KEYS:
+            continue
+        if value is None:
+            value = ""
+        clean[key] = str(value).strip()
+    return clean
+
+
+async def set_bot_state(key: str, value: str) -> None:
     async with AsyncSessionLocal() as db:
-        row = await db.get(AdminSetting, key)
+        row = (await db.execute(select(BotState).where(BotState.key == key))).scalars().first()
+        if row:
+            row.value = value
+        else:
+            db.add(BotState(key=key, value=value))
+        await db.commit()
+
+
+async def get_bot_state(key: str, default: str = "") -> str:
+    async with AsyncSessionLocal() as db:
+        row = (await db.execute(select(BotState).where(BotState.key == key))).scalars().first()
         return row.value if row else default
 
-async def set_setting(key: str, value: str) -> dict:
-    async with AsyncSessionLocal() as db:
-        row = await db.get(AdminSetting, key)
-        if not row:
-            row = AdminSetting(key=key, value=str(value))
-            db.add(row)
-        else:
-            row.value = str(value)
-        await db.commit()
-    return {"key": key, "value": value}
 
-async def get_all_settings() -> dict:
-    async with AsyncSessionLocal() as db:
-        rows = (await db.execute(select(AdminSetting))).scalars().all()
-    return {r.key: r.value for r in rows}
+async def save_admin_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    clean = normalize_payload(payload)
 
-async def save_risk_settings(payload: dict) -> dict:
-    allowed = [
-        "max_risk_per_trade", "max_daily_loss", "max_weekly_loss",
-        "max_concurrent_trades", "default_leverage", "max_leverage",
-        "consensus_threshold", "min_confidence_score", "signal_confluence_required",
-        "preferred_pairs",
+    for key, value in clean.items():
+        await set_bot_state(key, value)
+
+    update_env_file(clean)
+
+    return {
+        "ok": True,
+        "saved_keys": sorted(clean.keys()),
+        "restart_required": True,
+        "message": "Settings saved. Restart Docker container for exchange/API config changes to fully apply.",
+    }
+
+
+async def load_admin_settings() -> dict[str, Any]:
+    exchange = await get_bot_state("EXCHANGE", getattr(settings, "exchange", "bitget"))
+    trading_mode = await get_bot_state("TRADING_MODE", getattr(settings, "trading_mode", "paper"))
+
+    data = {
+        "APP_NAME": getattr(settings, "app_name", "APEX AI Trading Platform"),
+        "EXCHANGE": exchange,
+        "TRADING_MODE": trading_mode,
+        "DRY_RUN": str(getattr(settings, "dry_run", True)).lower(),
+        "BINANCE_TESTNET": str(getattr(settings, "binance_testnet", True)).lower(),
+        "BINANCE_MARKET_TYPE": getattr(settings, "binance_market_type", "spot"),
+        "BITGET_MARKET_TYPE": getattr(settings, "bitget_market_type", "spot"),
+        "AI_OPENAI_ENABLED": str(getattr(settings, "ai_openai_enabled", False)).lower(),
+        "AI_CLAUDE_ENABLED": str(getattr(settings, "ai_claude_enabled", False)).lower(),
+        "MAX_RISK_PER_TRADE": str(getattr(settings, "max_risk_per_trade", 0.005)),
+        "MAX_DAILY_LOSS": str(getattr(settings, "max_daily_loss", 0.03)),
+        "MAX_WEEKLY_LOSS": str(getattr(settings, "max_weekly_loss", 0.08)),
+        "DEFAULT_LEVERAGE": str(getattr(settings, "default_leverage", 1)),
+        "MAX_LEVERAGE": str(getattr(settings, "max_leverage", 3)),
+        "CONSENSUS_THRESHOLD": str(getattr(settings, "consensus_threshold", 0.65)),
+        "MIN_CONFIDENCE_SCORE": str(getattr(settings, "min_confidence_score", 0.70)),
+        "SIGNAL_CONFLUENCE_REQUIRED": str(getattr(settings, "signal_confluence_required", 4)),
+        "PREFERRED_PAIRS": getattr(settings, "preferred_pairs", "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,AVAX/USDT"),
+        "BINANCE_API_KEY_MASKED": mask_secret(getattr(settings, "binance_api_key", "")),
+        "BITGET_API_KEY_MASKED": mask_secret(getattr(settings, "bitget_api_key", "")),
+        "OPENAI_API_KEY_MASKED": mask_secret(getattr(settings, "openai_api_key", "")),
+        "ANTHROPIC_API_KEY_MASKED": mask_secret(getattr(settings, "anthropic_api_key", "")),
+        "TELEGRAM_BOT_TOKEN_MASKED": mask_secret(getattr(settings, "telegram_bot_token", "")),
+    }
+    data.update(mode_flags(trading_mode))
+    return data
+
+
+def update_env_file(values: dict[str, str]) -> None:
+    env_path = Path(".env")
+    existing: dict[str, str] = {}
+
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if not line.strip() or line.strip().startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            existing[k.strip()] = v.strip()
+
+    existing.update(values)
+
+    mode = existing.get("TRADING_MODE", "paper").lower()
+    if mode == "paper":
+        existing["DRY_RUN"] = "true"
+    elif mode in {"demo", "testnet"}:
+        existing["DRY_RUN"] = "false"
+        existing["BINANCE_TESTNET"] = "true"
+    elif mode == "live":
+        existing["DRY_RUN"] = "false"
+        existing["BINANCE_TESTNET"] = "false"
+
+    order = [
+        "APP_NAME", "ENV", "DRY_RUN", "EXCHANGE", "TRADING_MODE",
+        "BINANCE_TESTNET", "BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_MARKET_TYPE",
+        "BITGET_API_KEY", "BITGET_API_SECRET", "BITGET_API_PASSWORD", "BITGET_MARKET_TYPE",
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AI_OPENAI_ENABLED", "AI_CLAUDE_ENABLED",
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+        "DATABASE_URL", "SCAN_INTERVAL_SECONDS",
+        "MAX_RISK_PER_TRADE", "MAX_DAILY_LOSS", "MAX_WEEKLY_LOSS",
+        "MAX_CONCURRENT_TRADES", "DEFAULT_LEVERAGE", "MAX_LEVERAGE",
+        "CONSENSUS_THRESHOLD", "MIN_CONFIDENCE_SCORE", "SIGNAL_CONFLUENCE_REQUIRED", "PREFERRED_PAIRS",
     ]
-    saved = {}
-    for key in allowed:
-        if key in payload:
-            await set_setting(key, str(payload[key]))
-            saved[key] = payload[key]
-    return {"saved": saved}
 
-async def list_exchanges() -> list[dict]:
-    async with AsyncSessionLocal() as db:
-        rows = (await db.execute(select(ExchangeCredential).order_by(ExchangeCredential.id.desc()))).scalars().all()
-    return [{
-        "id": r.id,
-        "exchange": r.exchange,
-        "label": r.label,
-        "market_type": r.market_type,
-        "mode": r.mode,
-        "enabled": r.enabled,
-        "api_key": mask_secret(r.api_key_encrypted),
-        "api_secret": mask_secret(r.api_secret_encrypted),
-        "api_password": mask_secret(r.api_password_encrypted),
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-    } for r in rows]
+    lines = []
+    for key in order:
+        if key in existing:
+            lines.append(f"{key}={existing[key]}")
 
-async def save_exchange(payload: dict) -> dict:
-    exchange_id = payload.get("id")
-    now_values = {
-        "exchange": payload.get("exchange", "bitget").lower().strip(),
-        "label": payload.get("label", "Default"),
-        "market_type": payload.get("market_type", "spot"),
-        "mode": payload.get("mode", "paper"),
-        "enabled": bool(payload.get("enabled", True)),
-    }
+    for key in sorted(existing.keys()):
+        if key not in order:
+            lines.append(f"{key}={existing[key]}")
 
-    async with AsyncSessionLocal() as db:
-        row = await db.get(ExchangeCredential, exchange_id) if exchange_id else None
-        if not row:
-            row = ExchangeCredential(**now_values)
-            db.add(row)
-        else:
-            for k, v in now_values.items():
-                setattr(row, k, v)
-
-        if payload.get("api_key"):
-            row.api_key_encrypted = encrypt_secret(payload["api_key"])
-        if payload.get("api_secret"):
-            row.api_secret_encrypted = encrypt_secret(payload["api_secret"])
-        if payload.get("api_password"):
-            row.api_password_encrypted = encrypt_secret(payload["api_password"])
-
-        await db.commit()
-        await db.refresh(row)
-
-    return {"id": row.id, "exchange": row.exchange, "label": row.label, "enabled": row.enabled}
-
-async def list_ai_settings() -> dict:
-    settings = await get_all_settings()
-    return {
-        "openai_enabled": settings.get("openai_enabled", "false"),
-        "claude_enabled": settings.get("claude_enabled", "false"),
-        "openai_api_key": "saved" if settings.get("openai_api_key") else "",
-        "anthropic_api_key": "saved" if settings.get("anthropic_api_key") else "",
-    }
-
-async def save_ai_settings(payload: dict) -> dict:
-    if "openai_enabled" in payload:
-        await set_setting("openai_enabled", str(payload["openai_enabled"]).lower())
-    if "claude_enabled" in payload:
-        await set_setting("claude_enabled", str(payload["claude_enabled"]).lower())
-    if payload.get("openai_api_key"):
-        await set_setting("openai_api_key", encrypt_secret(payload["openai_api_key"]))
-    if payload.get("anthropic_api_key"):
-        await set_setting("anthropic_api_key", encrypt_secret(payload["anthropic_api_key"]))
-    return await list_ai_settings()
-
-async def bot_status() -> dict:
-    settings = await get_all_settings()
-    return {
-        "running": settings.get("bot_running", "false") == "true",
-        "active_exchange": settings.get("active_exchange", ""),
-        "mode": settings.get("bot_mode", "paper"),
-    }
-
-async def set_bot_running(running: bool) -> dict:
-    await set_setting("bot_running", "true" if running else "false")
-    return await bot_status()
+    env_path.write_text("\n".join(lines) + "\n")

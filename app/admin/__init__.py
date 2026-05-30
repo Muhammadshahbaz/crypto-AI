@@ -1,1 +1,1 @@
-# APEX v5.1 Admin package
+# APEX admin module
