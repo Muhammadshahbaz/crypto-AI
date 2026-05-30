@@ -7,8 +7,11 @@ from app.market.scanner import scan_all
 from app.trading.executor import TradeExecutor
 from app.paper.engine import dashboard_summary, list_paper_trades, update_open_paper_trades
 from app.dashboard.web import dashboard_page
+from app.admin.web import admin_page
+from app.admin.routes import router as admin_router
 
 app = FastAPI(title=settings.app_name)
+app.include_router(admin_router)
 
 @app.on_event('startup')
 async def startup():
@@ -16,11 +19,15 @@ async def startup():
 
 @app.get('/')
 async def root():
-    return {'status': 'ok', 'app': settings.app_name, 'dashboard': '/dashboard', 'docs': '/docs'}
+    return {'status': 'ok', 'app': settings.app_name, 'dashboard': '/dashboard', 'admin': '/admin', 'docs': '/docs'}
 
 @app.get('/dashboard')
 async def dashboard():
     return dashboard_page()
+
+@app.get('/admin')
+async def admin():
+    return admin_page()
 
 @app.get('/health')
 async def health():

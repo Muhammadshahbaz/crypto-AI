@@ -62,3 +62,26 @@ class PaperTrade(Base):
     status: Mapped[str] = mapped_column(String(32), default='open')
     close_reason: Mapped[str] = mapped_column(String(32), default='')
     notes: Mapped[str] = mapped_column(Text, default='')
+
+class AdminSetting(Base):
+    __tablename__ = 'admin_settings'
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default='')
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class ExchangeCredential(Base):
+    __tablename__ = 'exchange_credentials'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    exchange: Mapped[str] = mapped_column(String(32), default='bitget')
+    label: Mapped[str] = mapped_column(String(64), default='Default')
+    market_type: Mapped[str] = mapped_column(String(32), default='spot')
+    mode: Mapped[str] = mapped_column(String(32), default='paper')
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    api_key_encrypted: Mapped[str] = mapped_column(Text, default='')
+    api_secret_encrypted: Mapped[str] = mapped_column(Text, default='')
+    api_password_encrypted: Mapped[str] = mapped_column(Text, default='')
