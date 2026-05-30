@@ -1,25 +1,32 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', extra='ignore')
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_name: str = 'APEX v4 Binance'
-    env: str = 'dev'
+    app_name: str = "APEX AI Trading Platform"
+    env: str = "dev"
     dry_run: bool = True
-    binance_testnet: bool = True
-    binance_api_key: str = ''
-    binance_api_secret: str = ''
-    binance_market_type: str = 'spot'  # spot or future
 
-    openai_api_key: str = ''
-    anthropic_api_key: str = ''
+    exchange: str = "bitget"
+
+    binance_testnet: bool = True
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
+    binance_market_type: str = "spot"
+
+    bitget_api_key: str = ""
+    bitget_api_secret: str = ""
+    bitget_api_password: str = ""
+    bitget_market_type: str = "spot"
+
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
     ai_openai_enabled: bool = False
     ai_claude_enabled: bool = False
 
-    telegram_bot_token: str = ''
-    telegram_chat_id: str = ''
-    database_url: str = 'sqlite+aiosqlite:///./apex.db'
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    database_url: str = "sqlite+aiosqlite:///./data/apex.db"
 
     scan_interval_seconds: int = 60
     max_risk_per_trade: float = 0.005
@@ -31,10 +38,10 @@ class Settings(BaseSettings):
     consensus_threshold: float = 0.65
     min_confidence_score: float = 0.70
     signal_confluence_required: int = 4
-    preferred_pairs: str = 'BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,AVAX/USDT'
+    preferred_pairs: str = "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,AVAX/USDT"
 
     @property
     def pairs(self) -> list[str]:
-        return [p.strip() for p in self.preferred_pairs.split(',') if p.strip()]
+        return [p.strip() for p in self.preferred_pairs.split(",") if p.strip()]
 
 settings = Settings()

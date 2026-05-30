@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from app.config import settings
-from app.market.binance_client import BinanceClient
+from app.exchanges.factory import get_exchange_client
+from app.exchanges.base import ExchangeClient
 from app.trading.risk_manager import RiskManager, AccountSnapshot
 from app.ai.consensus import get_consensus
 from app.database.session import AsyncSessionLocal
@@ -11,7 +12,7 @@ class TradeExecutor:
     def __init__(self):
         self.risk = RiskManager()
 
-    async def _equity(self, client: BinanceClient) -> float:
+    async def _equity(self, client: ExchangeClient) -> float:
         bal = await client.fetch_balance()
         usdt = bal.get('USDT') or {}
         return float(usdt.get('total') or usdt.get('free') or 1000.0)
@@ -20,7 +21,7 @@ class TradeExecutor:
         if signal.get('error'):
             return {'status': 'error', 'signal': signal}
         consensus = await get_consensus(signal)
-        client = BinanceClient()
+        client = get_exchange_client()
         try:
             equity = await self._equity(client)
             account = AccountSnapshot(equity_usdt=equity)
