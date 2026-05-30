@@ -1,0 +1,293 @@
+#!/bin/bash
+set -e
+
+mkdir -p app/exchanges
+
+cat > app/exchanges/__init__.py <<'EOF'
+EOF
+
+cat > app/exchanges/base.py <<'EOF'
+from abc import ABC, abstractmethod
+
+class ExchangeClient(ABC):
+    name: str
+
+    @abstractmethod
+    async def close(self): ...
+
+    @abstractmethod
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 250): ...
+
+    @abstractmethod
+    async def fetch_balance(self): ...
+
+    @abstractmethod
+    async def create_order(self, symbol: str, side: str, amount: float, price: float | None = None): ...
+EOF
+
+cat > app/exchanges/binance.py <<'EOF'
+import ccxt.async_support as ccxt
+from app.config import settings
+from app.exchanges.base import ExchangeClient
+
+class BinanceClient(ExchangeClient):
+    name = "binance"
+
+    def __init__(self):
+        options = {"defaultType": "future" if settings.binance_market_type == "future" else "spot"}
+        self.exchange = ccxt.binance({
+            "apiKey": settings.binance_api_key,
+            "secret": settings.binance_api_secret,
+            "enableRateLimit": True,
+            "options": options,
+        })
+        if settings.binance_testnet:
+            self.exchange.set_sandbox_mode(True)
+
+    async def close(self):
+        await self.exchange.close()
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 250):
+        return await self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+    async def fetch_balance(self):
+        if settings.dry_run or not settings.binance_api_key:
+            return {"USDT": {"free": 1000.0, "total": 1000.0}}
+        return await self.exchange.fetch_balance()
+
+    async def create_order(self, symbol: str, side: str, amount: float, price: float | None = None):
+        if settings.dry_run:
+            return {
+                "id": "DRY_RUN",
+                "exchange": self.name,
+                "symbol": symbol,
+                "side": side,
+                "amount": amount,
+                "price": price,
+            }
+        if price:
+            return await self.exchange.create_limit_order(symbol, side, amount, price)
+        return await self.exchange.create_market_order(symbol, side, amount)
+EOF
+
+cat > app/exchanges/bitget.py <<'EOF'
+import ccxt.async_support as ccxt
+from app.config import settings
+from app.exchanges.base import ExchangeClient
+
+class BitgetClient(ExchangeClient):
+    name = "bitget"
+
+    def __init__(self):
+        options = {"defaultType": "swap" if settings.bitget_market_type == "swap" else "spot"}
+        self.exchange = ccxt.bitget({
+            "apiKey": settings.bitget_api_key,
+            "secret": settings.bitget_api_secret,
+            "password": settings.bitget_api_password,
+            "enableRateLimit": True,
+            "options": options,
+        })
+
+    async def close(self):
+        await self.exchange.close()
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "15m", limit: int = 250):
+        return await self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+
+    async def fetch_balance(self):
+        if settings.dry_run or not settings.bitget_api_key:
+            return {"USDT": {"free": 1000.0, "total": 1000.0}}
+        return await self.exchange.fetch_balance()
+
+    async def create_order(self, symbol: str, side: str, amount: float, price: float | None = None):
+        if settings.dry_run:
+            return {
+                "id": "DRY_RUN",
+                "exchange": self.name,
+                "symbol": symbol,
+                "side": side,
+                "amount": amount,
+                "price": price,
+            }
+        if price:
+            return await self.exchange.create_limit_order(symbol, side, amount, price)
+        return await self.exchange.create_market_order(symbol, side, amount)
+EOF
+
+cat > app/exchanges/factory.py <<'EOF'
+from app.config import settings
+from app.exchanges.binance import BinanceClient
+from app.exchanges.bitget import BitgetClient
+
+def get_exchange_client():
+    exchange = settings.exchange.lower().strip()
+
+    if exchange == "binance":
+        return BinanceClient()
+
+    if exchange == "bitget":
+        return BitgetClient()
+
+    raise ValueError(f"Unsupported exchange: {settings.exchange}")
+EOF
+
+cat > app/config.py <<'EOF'
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    app_name: str = "APEX AI Trading Platform"
+    env: str = "dev"
+    dry_run: bool = True
+
+    exchange: str = "bitget"
+
+    binance_testnet: bool = True
+    binance_api_key: str = ""
+    binance_api_secret: str = ""
+    binance_market_type: str = "spot"
+
+    bitget_api_key: str = ""
+    bitget_api_secret: str = ""
+    bitget_api_password: str = ""
+    bitget_market_type: str = "spot"
+
+    openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    ai_openai_enabled: bool = False
+    ai_claude_enabled: bool = False
+
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    database_url: str = "sqlite+aiosqlite:///./data/apex.db"
+
+    scan_interval_seconds: int = 60
+    max_risk_per_trade: float = 0.005
+    max_daily_loss: float = 0.03
+    max_weekly_loss: float = 0.08
+    max_concurrent_trades: int = 3
+    default_leverage: int = 1
+    max_leverage: int = 3
+    consensus_threshold: float = 0.65
+    min_confidence_score: float = 0.70
+    signal_confluence_required: int = 4
+    preferred_pairs: str = "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,AVAX/USDT"
+
+    @property
+    def pairs(self) -> list[str]:
+        return [p.strip() for p in self.preferred_pairs.split(",") if p.strip()]
+
+settings = Settings()
+EOF
+
+cat > app/market/scanner.py <<'EOF'
+import pandas as pd
+from app.exchanges.base import ExchangeClient
+from app.exchanges.factory import get_exchange_client
+from app.market.indicators import add_indicators
+from app.market.regime_detector import detect_regime
+from app.trading.strategies.selector import build_signal
+
+async def scan_pair(client: ExchangeClient, pair: str) -> dict | None:
+    raw = await client.fetch_ohlcv(pair, "15m", 250)
+    df = pd.DataFrame(raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+    df = add_indicators(df)
+    if df.empty:
+        return None
+
+    row = df.iloc[-1].to_dict()
+    regime = detect_regime(row)
+    signal = build_signal(pair, row, regime)
+    signal["exchange"] = client.name
+    return signal
+
+async def scan_all(pairs: list[str]) -> list[dict]:
+    client = get_exchange_client()
+    try:
+        results = []
+        for pair in pairs:
+            try:
+                signal = await scan_pair(client, pair)
+                if signal:
+                    results.append(signal)
+            except Exception as exc:
+                results.append({
+                    "exchange": client.name,
+                    "pair": pair,
+                    "direction": "SKIP",
+                    "error": str(exc),
+                })
+        return results
+    finally:
+        await client.close()
+EOF
+
+python3 - <<'PY'
+from pathlib import Path
+p = Path("app/trading/executor.py")
+s = p.read_text()
+s = s.replace("from app.market.binance_client import BinanceClient", "from app.exchanges.factory import get_exchange_client\nfrom app.exchanges.base import ExchangeClient")
+s = s.replace("async def _equity(self, client: BinanceClient) -> float:", "async def _equity(self, client: ExchangeClient) -> float:")
+s = s.replace("client = BinanceClient()", "client = get_exchange_client()")
+p.write_text(s)
+PY
+
+cat > .env.example <<'EOF'
+APP_NAME=APEX AI Trading Platform
+ENV=dev
+DRY_RUN=true
+
+# Active exchange: bitget or binance
+EXCHANGE=bitget
+
+# Binance
+BINANCE_TESTNET=true
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+BINANCE_MARKET_TYPE=spot
+
+# Bitget
+BITGET_API_KEY=
+BITGET_API_SECRET=
+BITGET_API_PASSWORD=
+BITGET_MARKET_TYPE=spot
+
+# AI
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+AI_OPENAI_ENABLED=false
+AI_CLAUDE_ENABLED=false
+
+# Alerts
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# Storage
+DATABASE_URL=sqlite+aiosqlite:///./data/apex.db
+
+SCAN_INTERVAL_SECONDS=60
+MAX_RISK_PER_TRADE=0.005
+MAX_DAILY_LOSS=0.03
+MAX_WEEKLY_LOSS=0.08
+MAX_CONCURRENT_TRADES=3
+DEFAULT_LEVERAGE=1
+MAX_LEVERAGE=3
+CONSENSUS_THRESHOLD=0.65
+MIN_CONFIDENCE_SCORE=0.70
+SIGNAL_CONFLUENCE_REQUIRED=4
+PREFERRED_PAIRS=BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,AVAX/USDT
+EOF
+
+mkdir -p data
+
+grep -q "^EXCHANGE=" .env && sed -i "s/^EXCHANGE=.*/EXCHANGE=bitget/" .env || echo "EXCHANGE=bitget" >> .env
+grep -q "^DATABASE_URL=" .env && sed -i "s|^DATABASE_URL=.*|DATABASE_URL=sqlite+aiosqlite:///./data/apex.db|" .env || echo "DATABASE_URL=sqlite+aiosqlite:///./data/apex.db" >> .env
+
+git add .
+git commit -m "Add multi-exchange architecture with Bitget support" || true
+git push origin main
+
+docker compose down
+docker compose up -d --build
+docker compose logs --tail=80

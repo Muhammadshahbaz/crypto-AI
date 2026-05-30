@@ -5,6 +5,8 @@ from app.database.session import init_db, AsyncSessionLocal
 from app.database.models import TradeLog
 from app.market.scanner import scan_all
 from app.trading.executor import TradeExecutor
+from app.paper.engine import dashboard_summary, list_paper_trades, update_open_paper_trades
+from app.dashboard.web import dashboard_page
 
 app = FastAPI(title=settings.app_name)
 
@@ -12,13 +14,29 @@ app = FastAPI(title=settings.app_name)
 async def startup():
     await init_db()
 
+@app.get('/')
+async def root():
+    return {'status': 'ok', 'app': settings.app_name, 'dashboard': '/dashboard', 'docs': '/docs'}
+
+@app.get('/dashboard')
+async def dashboard():
+    return dashboard_page()
+
 @app.get('/health')
 async def health():
-    return {'status': 'ok', 'app': settings.app_name, 'dry_run': settings.dry_run, 'testnet': settings.binance_testnet}
+    return {
+        'status': 'ok',
+        'app': settings.app_name,
+        'exchange': settings.exchange,
+        'dry_run': settings.dry_run,
+        'testnet': settings.binance_testnet,
+    }
 
 @app.get('/api/config')
 async def config():
     return {
+        'app': settings.app_name,
+        'exchange': settings.exchange,
         'pairs': settings.pairs,
         'dry_run': settings.dry_run,
         'testnet': settings.binance_testnet,
@@ -28,6 +46,7 @@ async def config():
 
 @app.post('/api/scan-once')
 async def scan_once():
+    await update_open_paper_trades()
     signals = await scan_all(settings.pairs)
     executor = TradeExecutor()
     results = []
@@ -36,7 +55,21 @@ async def scan_once():
             results.append(await executor.evaluate_and_execute(signal))
         else:
             results.append({'ok': False, 'blocks': ['strategy skipped'], 'signal': signal})
-    return {'count': len(results), 'results': results}
+    updates = await update_open_paper_trades()
+    return {'count': len(results), 'closed_updates': updates, 'results': results}
+
+@app.post('/api/paper/update')
+async def paper_update():
+    updates = await update_open_paper_trades()
+    return {'updated': len(updates), 'results': updates}
+
+@app.get('/api/dashboard/summary')
+async def dashboard_api_summary():
+    return await dashboard_summary()
+
+@app.get('/api/paper-trades')
+async def paper_trades(status: str | None = None, limit: int = 100):
+    return await list_paper_trades(status=status, limit=limit)
 
 @app.get('/api/trades')
 async def trades(limit: int = 50):

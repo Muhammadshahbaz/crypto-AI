@@ -7,6 +7,7 @@ from app.ai.consensus import get_consensus
 from app.database.session import AsyncSessionLocal
 from app.database.models import TradeLog
 from app.notifications.telegram import notify
+from app.paper.engine import open_paper_trade
 
 class TradeExecutor:
     def __init__(self):
@@ -46,6 +47,8 @@ class TradeExecutor:
             order = await client.create_order(signal['pair'], side, amount, signal['entry'])
             result['order'] = order
             await self._log_trade(signal, consensus, amount, risk_usdt, 'dry_run' if settings.dry_run else 'submitted')
+            if settings.dry_run:
+                await open_paper_trade(signal, consensus, amount, risk_usdt)
             await notify(self._format_alert(signal, consensus, amount, risk_usdt))
             return result
         finally:
